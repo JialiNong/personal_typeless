@@ -19,6 +19,7 @@ export default async function Home({
       initialSource={first(params.source)}
       initialWarning={first(params.warning)}
       initialError={first(params.error)}
+      initialLanguage={first(params.lang)}
     />
   );
 }

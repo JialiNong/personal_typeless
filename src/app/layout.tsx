@@ -2,8 +2,6 @@ import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Noto_Sans_SC } from "next/font/google";
 
-import { TooltipProvider } from "@/components/ui/tooltip";
-
 import "./globals.css";
 
 const geistSans = Geist({
@@ -39,7 +37,8 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${notoSansSc.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col">
-        <TooltipProvider>{children}</TooltipProvider>
+        {children}
+        <script src="/talk-boot.js" defer />
       </body>
     </html>
   );

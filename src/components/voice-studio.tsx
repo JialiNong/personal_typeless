@@ -28,6 +28,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { LANGUAGES, type LanguageId } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
+declare global {
+  interface Window {
+    __TYPELESS_HYDRATED?: boolean;
+    __TYPELESS_TALK?: () => void;
+    __TYPELESS_SET_LANG?: (id: string) => void;
+  }
+}
+
 type Phase = "idle" | "recording" | "transcribing" | "cleaning" | "ready";
 
 type VoiceStudioProps = {
@@ -36,7 +44,18 @@ type VoiceStudioProps = {
   initialSource?: string;
   initialWarning?: string;
   initialError?: string;
+  initialLanguage?: string;
 };
+
+function isLanguageId(value: string): value is LanguageId {
+  return LANGUAGES.some((item) => item.id === value);
+}
+
+function languageHref(id: LanguageId, current: URLSearchParams) {
+  const next = new URLSearchParams(current);
+  next.set("lang", id);
+  return `/?${next.toString()}`;
+}
 
 function CleanSubmitButton({ disabled }: { disabled: boolean }) {
   const { pending } = useFormStatus();
@@ -94,9 +113,12 @@ export function VoiceStudio({
   initialSource = "",
   initialWarning = "",
   initialError = "",
+  initialLanguage = "auto",
 }: VoiceStudioProps) {
   const [phase, setPhase] = useState<Phase>("idle");
-  const [language, setLanguage] = useState<LanguageId>("auto");
+  const [language, setLanguage] = useState<LanguageId>(
+    isLanguageId(initialLanguage) ? initialLanguage : "auto",
+  );
   const [elapsed, setElapsed] = useState(0);
   const [modelProgress, setModelProgress] = useState(0);
   const [modelFile, setModelFile] = useState<string | undefined>();
@@ -123,6 +145,8 @@ export function VoiceStudio({
   languageRef.current = language;
   rawTextRef.current = rawText;
 
+  const toggleTalkRef = useRef<() => Promise<void>>(async () => undefined);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -141,9 +165,19 @@ export function VoiceStudio({
     }
 
     void loadStatus();
+    window.__TYPELESS_HYDRATED = true;
+    window.__TYPELESS_TALK = () => {
+      void toggleTalkRef.current();
+    };
+    window.__TYPELESS_SET_LANG = (id: string) => {
+      if (isLanguageId(id)) setLanguage(id);
+    };
 
     return () => {
       cancelled = true;
+      delete window.__TYPELESS_TALK;
+      delete window.__TYPELESS_SET_LANG;
+      delete window.__TYPELESS_HYDRATED;
       stopTracks();
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
@@ -334,8 +368,9 @@ export function VoiceStudio({
     await startTalking();
   }
 
+  toggleTalkRef.current = toggleTalk;
+
   const busy = phase === "transcribing" || phase === "cleaning";
-  const canTalk = phase === "recording" || !busy;
   const shownClean = cleanText;
   const shownSource = initialSource;
   const shownWarning = warning;
@@ -375,32 +410,33 @@ export function VoiceStudio({
         <CardContent className="flex flex-col items-center gap-5 py-8 sm:py-10">
           <button
             type="button"
+            id="talk-button"
             aria-pressed={phase === "recording"}
             aria-label={phase === "recording" ? "Stop talking" : "Start talking"}
-            disabled={!canTalk}
+            disabled={phase === "transcribing"}
             onClick={() => void toggleTalk()}
             className={cn(
-              "relative flex size-28 items-center justify-center rounded-full text-primary-foreground shadow-lg transition-transform outline-none focus-visible:ring-4 focus-visible:ring-ring/40 sm:size-32",
+              "relative z-20 flex size-28 cursor-pointer items-center justify-center rounded-full text-primary-foreground shadow-lg transition-transform outline-none pointer-events-auto focus-visible:ring-4 focus-visible:ring-ring/40 sm:size-32",
               phase === "recording"
                 ? "bg-destructive hover:bg-destructive/90"
                 : "bg-primary hover:bg-primary/90",
-              !canTalk && "opacity-50",
+              phase === "transcribing" && "opacity-50",
             )}
           >
             {phase === "recording" ? (
-              <Square className="size-8 fill-current" />
+              <Square className="size-8 fill-current pointer-events-none" />
             ) : busy || whisperLoading ? (
-              <LoaderCircle className="size-8 animate-spin" />
+              <LoaderCircle className="size-8 animate-spin pointer-events-none" />
             ) : (
-              <Mic className="size-9" />
+              <Mic className="size-9 pointer-events-none" />
             )}
             {phase === "recording" ? (
-              <span className="absolute inset-0 animate-ping rounded-full bg-destructive/30" />
+              <span className="pointer-events-none absolute inset-0 animate-ping rounded-full bg-destructive/30" />
             ) : null}
           </button>
 
           <div className="space-y-1 text-center">
-            <p className="text-base font-medium">
+            <p id="talk-status" className="text-base font-medium">
               {phase === "recording"
                 ? `Listening… ${formatClock(elapsed)}`
                 : phase === "transcribing"
@@ -416,19 +452,37 @@ export function VoiceStudio({
             </p>
           </div>
 
-          <div className="flex flex-wrap justify-center gap-2">
-            {LANGUAGES.map((item) => (
-              <Button
-                key={item.id}
-                type="button"
-                size="sm"
-                variant={language === item.id ? "default" : "outline"}
-                disabled={phase === "recording"}
-                onClick={() => setLanguage(item.id)}
-              >
-                {item.label}
-              </Button>
-            ))}
+          <div className="relative z-20 flex flex-wrap justify-center gap-2">
+            {LANGUAGES.map((item) => {
+              const query = new URLSearchParams();
+              if (initialRaw) query.set("raw", initialRaw);
+              if (initialClean) query.set("clean", initialClean);
+              if (initialSource) query.set("source", initialSource);
+              if (initialWarning) query.set("warning", initialWarning);
+              if (initialError) query.set("error", initialError);
+              return (
+                <a
+                  key={item.id}
+                  id={`lang-${item.id}`}
+                  data-lang-link={item.id}
+                  href={languageHref(item.id, query)}
+                  aria-current={language === item.id ? "true" : undefined}
+                  className={cn(
+                    buttonVariants({
+                      variant: language === item.id ? "default" : "outline",
+                      size: "sm",
+                    }),
+                    "pointer-events-auto no-underline",
+                  )}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    setLanguage(item.id);
+                  }}
+                >
+                  {item.label}
+                </a>
+              );
+            })}
           </div>
 
           {whisperLoading ? (
@@ -441,6 +495,8 @@ export function VoiceStudio({
           ) : null}
         </CardContent>
       </Card>
+
+      <p id="talk-error" hidden className="text-sm text-destructive" />
 
       {shownError ? (
         <Alert variant="destructive">
