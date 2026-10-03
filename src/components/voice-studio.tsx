@@ -30,13 +30,7 @@ import {
 } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
-type Phase =
-  | "idle"
-  | "loading-model"
-  | "recording"
-  | "transcribing"
-  | "cleaning"
-  | "ready";
+type Phase = "idle" | "recording" | "transcribing" | "cleaning" | "ready";
 
 type StatusResponse = {
   openai: boolean;
@@ -75,7 +69,7 @@ function CopyButton({ text, disabled }: { text: string; disabled?: boolean }) {
 }
 
 export function VoiceStudio() {
-  const [phase, setPhase] = useState<Phase>("loading-model");
+  const [phase, setPhase] = useState<Phase>("idle");
   const [language, setLanguage] = useState<LanguageId>("auto");
   const [elapsed, setElapsed] = useState(0);
   const [modelProgress, setModelProgress] = useState(0);
@@ -117,6 +111,7 @@ export function VoiceStudio() {
 
     async function loadWhisper() {
       try {
+        setModelFile("Contacting Hugging Face…");
         const { warmupWhisper } = await import("@/lib/whisper");
         await warmupWhisper((progress) => {
           if (cancelled) return;
@@ -125,7 +120,7 @@ export function VoiceStudio() {
         });
         if (!cancelled) {
           setWhisperReady(true);
-          setPhase((current) => (current === "loading-model" ? "idle" : current));
+          setModelProgress(100);
         }
       } catch (loadError) {
         if (cancelled) return;
@@ -134,7 +129,6 @@ export function VoiceStudio() {
             ? loadError.message
             : "Whisper could not start in this browser.",
         );
-        setPhase((current) => (current === "loading-model" ? "idle" : current));
       }
     }
 
@@ -323,17 +317,15 @@ export function VoiceStudio() {
       await finishTalking();
       return;
     }
-    if (phase === "transcribing" || phase === "cleaning" || phase === "loading-model") {
+    if (phase === "transcribing" || phase === "cleaning") {
       return;
     }
     await startTalking();
   }
 
-  const busy =
-    phase === "loading-model" ||
-    phase === "transcribing" ||
-    phase === "cleaning";
+  const busy = phase === "transcribing" || phase === "cleaning";
   const canTalk = phase === "recording" || (!busy && whisperReady);
+  const canClean = phase !== "cleaning" && Boolean(rawText.trim());
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10">
@@ -377,7 +369,7 @@ export function VoiceStudio() {
           >
             {phase === "recording" ? (
               <Square className="size-8 fill-current" />
-            ) : busy ? (
+            ) : busy || (!whisperReady && !whisperError) ? (
               <LoaderCircle className="size-8 animate-spin" />
             ) : (
               <Mic className="size-9" />
@@ -395,7 +387,7 @@ export function VoiceStudio() {
                   ? "Turning speech into text on this device…"
                   : phase === "cleaning"
                     ? "Removing fillers and 口癖…"
-                    : phase === "loading-model"
+                    : !whisperReady && !whisperError
                       ? "Downloading Whisper into this browser…"
                       : "Click to talk · click again to stop"}
             </p>
@@ -419,7 +411,7 @@ export function VoiceStudio() {
             ))}
           </div>
 
-          {phase === "loading-model" ? (
+          {!whisperReady && !whisperError ? (
             <Progress value={modelProgress} className="w-full max-w-md">
               <ProgressLabel>
                 {modelFile ? `Fetching ${modelFile}` : "Preparing Whisper base"}
@@ -484,7 +476,7 @@ export function VoiceStudio() {
               type="button"
               variant="outline"
               size="sm"
-              disabled={busy || !rawText.trim()}
+              disabled={!canClean}
               onClick={() => void runCleanup(rawText)}
             >
               Clean this text
