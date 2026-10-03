@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -10,6 +10,7 @@ import {
   Square,
 } from "lucide-react";
 
+import { cleanupAction } from "@/app/actions";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -23,12 +24,7 @@ import {
 } from "@/components/ui/card";
 import { Progress, ProgressLabel, ProgressValue } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { cleanTranscriptLocally } from "@/lib/cleanup";
-import {
-  LANGUAGES,
-  type CleanupSource,
-  type LanguageId,
-} from "@/lib/constants";
+import { LANGUAGES, type LanguageId } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning" | "ready";
@@ -82,9 +78,12 @@ export function VoiceStudio() {
   const [warning, setWarning] = useState<string | null>(null);
   const [rawText, setRawText] = useState("");
   const [cleanText, setCleanText] = useState("");
-  const [cleanupSource, setCleanupSource] = useState<CleanupSource | null>(null);
   const [openaiReady, setOpenaiReady] = useState<boolean | null>(null);
   const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
+  const [cleanupState, cleanupFormAction, cleanupPending] = useActionState(
+    cleanupAction,
+    { raw: "", text: "", source: "" as const, error: "", warning: "" },
+  );
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -93,6 +92,7 @@ export function VoiceStudio() {
   const languageRef = useRef(language);
   const rawTextRef = useRef(rawText);
   const rawAreaRef = useRef<HTMLTextAreaElement>(null);
+  const cleanupFormRef = useRef<HTMLFormElement>(null);
   const whisperLoadingRef = useRef(false);
 
   languageRef.current = language;
@@ -281,7 +281,7 @@ export function VoiceStudio() {
       }
 
       writeRawText(transcript);
-      await runCleanup(transcript);
+      cleanupFormRef.current?.requestSubmit();
     } catch (transcribeError) {
       setError(
         transcribeError instanceof Error
@@ -292,57 +292,10 @@ export function VoiceStudio() {
     }
   }
 
-  async function runCleanup(transcript: string) {
-    const text = transcript.trim();
-    if (!text) {
-      setError("Nothing to clean yet. Paste or record some speech first.");
-      return;
-    }
-
-    writeRawText(text);
-    setPhase("cleaning");
-    setError(null);
-
-    const localText = cleanTranscriptLocally(text);
-    setCleanText(localText);
-    setCleanupSource("local");
-
-    try {
-      const response = await fetch("/api/cleanup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: text }),
-      });
-      const payload = (await response.json()) as {
-        text?: string;
-        source?: CleanupSource;
-        warning?: string;
-        error?: string;
-      };
-
-      if (payload.text) {
-        setCleanText(payload.text);
-        setCleanupSource(payload.source ?? "local");
-        setWarning(payload.warning ?? null);
-      } else if (!response.ok) {
-        setWarning(payload.error ?? "OpenAI cleanup failed; kept the local edit.");
-      }
-    } catch {
-      setWarning("Could not reach the cleanup API, so Typeless used the local edit.");
-    } finally {
-      setPhase("ready");
-    }
-  }
-
   function writeRawText(text: string) {
     rawTextRef.current = text;
     if (rawAreaRef.current) rawAreaRef.current.value = text;
     setRawText(text);
-  }
-
-  function handleCleanClick() {
-    const text = rawAreaRef.current?.value ?? rawTextRef.current;
-    void runCleanup(text);
   }
 
   async function toggleTalk() {
@@ -356,9 +309,13 @@ export function VoiceStudio() {
     await startTalking();
   }
 
-  const busy = phase === "transcribing" || phase === "cleaning";
+  const busy = phase === "transcribing" || phase === "cleaning" || cleanupPending;
   const canTalk = phase === "recording" || !busy;
-  const canClean = phase !== "cleaning";
+  const canClean = !cleanupPending;
+  const shownClean = cleanupState.text || cleanText;
+  const shownSource = cleanupState.source;
+  const shownWarning = cleanupState.warning || warning;
+  const shownError = cleanupState.error || error;
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10">
@@ -461,19 +418,19 @@ export function VoiceStudio() {
         </CardContent>
       </Card>
 
-      {error ? (
+      {shownError ? (
         <Alert variant="destructive">
           <AlertCircle />
           <AlertTitle>Something stopped the take</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{shownError}</AlertDescription>
         </Alert>
       ) : null}
 
-      {warning ? (
+      {shownWarning ? (
         <Alert>
           <AlertCircle />
           <AlertTitle>Used the local fallback</AlertTitle>
-          <AlertDescription>{warning}</AlertDescription>
+          <AlertDescription>{shownWarning}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -505,24 +462,36 @@ export function VoiceStudio() {
                 Transcribing on this device…
               </p>
             ) : null}
-            <Textarea
-              ref={rawAreaRef}
-              defaultValue=""
-              onInput={(event) => {
-                rawTextRef.current = event.currentTarget.value;
-                setRawText(event.currentTarget.value);
-              }}
-              placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
-              className="min-h-48 resize-y"
-            />
-            <button
-              type="button"
-              disabled={!canClean}
-              onClick={handleCleanClick}
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+            <form
+              ref={cleanupFormRef}
+              action={cleanupFormAction}
+              className="space-y-3"
             >
-              Clean this text
-            </button>
+              <Textarea
+                id="raw-speech"
+                name="transcript"
+                ref={rawAreaRef}
+                defaultValue={cleanupState.raw}
+                onChange={(event) => {
+                  rawTextRef.current = event.currentTarget.value;
+                  setRawText(event.currentTarget.value);
+                }}
+                onInput={(event) => {
+                  rawTextRef.current = event.currentTarget.value;
+                  setRawText(event.currentTarget.value);
+                }}
+                placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
+                className="min-h-48 resize-y"
+              />
+              <button
+                type="submit"
+                id="clean-text-button"
+                disabled={!canClean}
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                Clean this text
+              </button>
+            </form>
           </CardContent>
         </Card>
 
@@ -530,25 +499,26 @@ export function VoiceStudio() {
           <CardHeader className="border-b">
             <CardTitle>Clean text</CardTitle>
             <CardDescription>
-              {cleanupSource === "openai"
+              {shownSource === "openai"
                 ? "Edited by OpenAI from your transcript."
-                : cleanupSource === "local"
+                : shownSource === "local"
                   ? "Local cleanup — fillers removed without an API key."
                   : "Structured text will land here after you stop talking."}
             </CardDescription>
             <CardAction>
-              <CopyButton text={cleanText} />
+              <CopyButton text={shownClean} />
             </CardAction>
           </CardHeader>
           <CardContent>
-            {phase === "cleaning" ? (
+            {cleanupPending || phase === "cleaning" ? (
               <p className="flex items-center gap-2 text-sm text-muted-foreground">
                 <LoaderCircle className="size-4 animate-spin" />
                 Removing fillers and 口癖…
               </p>
-            ) : cleanText ? (
+            ) : shownClean ? (
               <Textarea
-                value={cleanText}
+                id="clean-speech"
+                value={shownClean}
                 onChange={(event) => setCleanText(event.target.value)}
                 className="min-h-48 resize-y border-transparent bg-transparent px-0 shadow-none focus-visible:ring-0"
               />
