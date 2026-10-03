@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   AlertCircle,
   Check,
@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/card";
 import { Progress, ProgressLabel, ProgressValue } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
+import { cleanTranscriptLocally } from "@/lib/cleanup";
 import {
   LANGUAGES,
   type CleanupSource,
@@ -75,6 +76,7 @@ export function VoiceStudio() {
   const [modelProgress, setModelProgress] = useState(0);
   const [modelFile, setModelFile] = useState<string | undefined>();
   const [whisperReady, setWhisperReady] = useState(false);
+  const [whisperLoading, setWhisperLoading] = useState(false);
   const [whisperError, setWhisperError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -89,8 +91,11 @@ export function VoiceStudio() {
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<number | null>(null);
   const languageRef = useRef(language);
+  const rawTextRef = useRef(rawText);
+  const whisperLoadingRef = useRef(false);
 
   languageRef.current = language;
+  rawTextRef.current = rawText;
 
   useEffect(() => {
     let cancelled = false;
@@ -109,31 +114,7 @@ export function VoiceStudio() {
       }
     }
 
-    async function loadWhisper() {
-      try {
-        setModelFile("Contacting Hugging Face…");
-        const { warmupWhisper } = await import("@/lib/whisper");
-        await warmupWhisper((progress) => {
-          if (cancelled) return;
-          setModelProgress(progress.percent);
-          setModelFile(progress.file);
-        });
-        if (!cancelled) {
-          setWhisperReady(true);
-          setModelProgress(100);
-        }
-      } catch (loadError) {
-        if (cancelled) return;
-        setWhisperError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Whisper could not start in this browser.",
-        );
-      }
-    }
-
     void loadStatus();
-    void loadWhisper();
 
     return () => {
       cancelled = true;
@@ -162,11 +143,44 @@ export function VoiceStudio() {
     }
   }
 
+  async function ensureWhisper(): Promise<boolean> {
+    if (whisperReady) return true;
+    if (whisperLoadingRef.current) return false;
+
+    whisperLoadingRef.current = true;
+    setWhisperLoading(true);
+    setModelProgress(0);
+    setModelFile("Contacting Hugging Face…");
+    setWhisperError(null);
+
+    try {
+      const { warmupWhisper } = await import("@/lib/whisper");
+      await warmupWhisper((progress) => {
+        setModelProgress(progress.percent);
+        setModelFile(progress.file);
+      });
+      setWhisperReady(true);
+      setModelProgress(100);
+      return true;
+    } catch (loadError) {
+      setWhisperError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Whisper could not start in this browser.",
+      );
+      return false;
+    } finally {
+      whisperLoadingRef.current = false;
+      setWhisperLoading(false);
+    }
+  }
+
   async function startTalking() {
     setError(null);
     setWarning(null);
 
-    if (!whisperReady) {
+    const ready = whisperReady || (await ensureWhisper());
+    if (!ready) {
       setError(
         whisperError ??
           "Whisper is still downloading. Wait for the model, or paste text below.",
@@ -278,14 +292,26 @@ export function VoiceStudio() {
   }
 
   async function runCleanup(transcript: string) {
+    const text = transcript.trim();
+    if (!text) {
+      setError("Nothing to clean yet. Paste or record some speech first.");
+      return;
+    }
+
+    setRawText(text);
+    rawTextRef.current = text;
     setPhase("cleaning");
     setError(null);
+
+    const localText = cleanTranscriptLocally(text);
+    setCleanText(localText);
+    setCleanupSource("local");
 
     try {
       const response = await fetch("/api/cleanup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript }),
+        body: JSON.stringify({ transcript: text }),
       });
       const payload = (await response.json()) as {
         text?: string;
@@ -294,22 +320,26 @@ export function VoiceStudio() {
         error?: string;
       };
 
-      if (!response.ok && !payload.text) {
-        throw new Error(payload.error ?? "Cleanup failed.");
+      if (payload.text) {
+        setCleanText(payload.text);
+        setCleanupSource(payload.source ?? "local");
+        setWarning(payload.warning ?? null);
+      } else if (!response.ok) {
+        setWarning(payload.error ?? "OpenAI cleanup failed; kept the local edit.");
       }
-
-      setCleanText(payload.text ?? "");
-      setCleanupSource(payload.source ?? "local");
-      setWarning(payload.warning ?? null);
-      setPhase("ready");
-    } catch (cleanupError) {
-      setError(
-        cleanupError instanceof Error
-          ? cleanupError.message
-          : "Cleanup failed. The raw transcript is still here.",
-      );
+    } catch {
+      setWarning("Could not reach the cleanup API, so Typeless used the local edit.");
+    } finally {
       setPhase("ready");
     }
+  }
+
+  function handleCleanupSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const data = new FormData(event.currentTarget);
+    const fromForm = String(data.get("transcript") ?? "");
+    void runCleanup(fromForm || rawTextRef.current);
   }
 
   async function toggleTalk() {
@@ -324,8 +354,8 @@ export function VoiceStudio() {
   }
 
   const busy = phase === "transcribing" || phase === "cleaning";
-  const canTalk = phase === "recording" || (!busy && whisperReady);
-  const canClean = phase !== "cleaning" && Boolean(rawText.trim());
+  const canTalk = phase === "recording" || !busy;
+  const canClean = phase !== "cleaning";
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10">
@@ -343,7 +373,13 @@ export function VoiceStudio() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Badge variant={whisperReady ? "default" : "outline"}>
-            {whisperReady ? "Whisper ready" : "Loading Whisper"}
+            {whisperReady
+              ? "Whisper ready"
+              : whisperError
+                ? "Whisper unavailable"
+                : whisperLoading
+                  ? "Loading Whisper"
+                  : "Whisper on Talk"}
           </Badge>
           <Badge variant={openaiReady ? "default" : "secondary"}>
             {openaiReady ? `OpenAI · ${openaiModel}` : "Local cleanup"}
@@ -369,7 +405,7 @@ export function VoiceStudio() {
           >
             {phase === "recording" ? (
               <Square className="size-8 fill-current" />
-            ) : busy || (!whisperReady && !whisperError) ? (
+            ) : busy || whisperLoading ? (
               <LoaderCircle className="size-8 animate-spin" />
             ) : (
               <Mic className="size-9" />
@@ -387,7 +423,7 @@ export function VoiceStudio() {
                   ? "Turning speech into text on this device…"
                   : phase === "cleaning"
                     ? "Removing fillers and 口癖…"
-                    : !whisperReady && !whisperError
+                    : whisperLoading
                       ? "Downloading Whisper into this browser…"
                       : "Click to talk · click again to stop"}
             </p>
@@ -411,7 +447,7 @@ export function VoiceStudio() {
             ))}
           </div>
 
-          {!whisperReady && !whisperError ? (
+          {whisperLoading ? (
             <Progress value={modelProgress} className="w-full max-w-md">
               <ProgressLabel>
                 {modelFile ? `Fetching ${modelFile}` : "Preparing Whisper base"}
@@ -466,21 +502,32 @@ export function VoiceStudio() {
                 Transcribing on this device…
               </p>
             ) : null}
-            <Textarea
-              value={rawText}
-              onChange={(event) => setRawText(event.target.value)}
-              placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
-              className="min-h-48 resize-y"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!canClean}
-              onClick={() => void runCleanup(rawText)}
+            <form
+              className="space-y-3"
+              method="post"
+              onSubmit={handleCleanupSubmit}
             >
-              Clean this text
-            </Button>
+              <Textarea
+                name="transcript"
+                value={rawText}
+                onChange={(event) => setRawText(event.target.value)}
+                onInput={(event) => {
+                  rawTextRef.current = event.currentTarget.value;
+                  setRawText(event.currentTarget.value);
+                }}
+                placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
+                className="min-h-48 resize-y"
+              />
+              <Button
+                nativeButton
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={!canClean}
+              >
+                Clean this text
+              </Button>
+            </form>
           </CardContent>
         </Card>
 
