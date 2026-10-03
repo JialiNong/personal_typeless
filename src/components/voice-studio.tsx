@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useFormStatus } from "react-dom";
 import {
   AlertCircle,
   Check,
@@ -28,6 +29,28 @@ import { LANGUAGES, type LanguageId } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
 type Phase = "idle" | "recording" | "transcribing" | "cleaning" | "ready";
+
+type VoiceStudioProps = {
+  initialRaw?: string;
+  initialClean?: string;
+  initialSource?: string;
+  initialWarning?: string;
+  initialError?: string;
+};
+
+function CleanSubmitButton({ disabled }: { disabled: boolean }) {
+  const { pending } = useFormStatus();
+  return (
+    <button
+      type="submit"
+      id="clean-text-button"
+      disabled={disabled || pending}
+      className={buttonVariants({ variant: "outline", size: "sm" })}
+    >
+      {pending ? "Cleaning…" : "Clean this text"}
+    </button>
+  );
+}
 
 type StatusResponse = {
   openai: boolean;
@@ -65,7 +88,13 @@ function CopyButton({ text, disabled }: { text: string; disabled?: boolean }) {
   );
 }
 
-export function VoiceStudio() {
+export function VoiceStudio({
+  initialRaw = "",
+  initialClean = "",
+  initialSource = "",
+  initialWarning = "",
+  initialError = "",
+}: VoiceStudioProps) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [language, setLanguage] = useState<LanguageId>("auto");
   const [elapsed, setElapsed] = useState(0);
@@ -74,16 +103,12 @@ export function VoiceStudio() {
   const [whisperReady, setWhisperReady] = useState(false);
   const [whisperLoading, setWhisperLoading] = useState(false);
   const [whisperError, setWhisperError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const [rawText, setRawText] = useState("");
-  const [cleanText, setCleanText] = useState("");
+  const [error, setError] = useState<string | null>(initialError || null);
+  const [warning, setWarning] = useState<string | null>(initialWarning || null);
+  const [rawText, setRawText] = useState(initialRaw);
+  const [cleanText, setCleanText] = useState(initialClean);
   const [openaiReady, setOpenaiReady] = useState<boolean | null>(null);
   const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
-  const [cleanupState, cleanupFormAction, cleanupPending] = useActionState(
-    cleanupAction,
-    { raw: "", text: "", source: "" as const, error: "", warning: "" },
-  );
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -309,13 +334,12 @@ export function VoiceStudio() {
     await startTalking();
   }
 
-  const busy = phase === "transcribing" || phase === "cleaning" || cleanupPending;
+  const busy = phase === "transcribing" || phase === "cleaning";
   const canTalk = phase === "recording" || !busy;
-  const canClean = !cleanupPending;
-  const shownClean = cleanupState.text || cleanText;
-  const shownSource = cleanupState.source;
-  const shownWarning = cleanupState.warning || warning;
-  const shownError = cleanupState.error || error;
+  const shownClean = cleanText;
+  const shownSource = initialSource;
+  const shownWarning = warning;
+  const shownError = error;
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10">
@@ -464,14 +488,14 @@ export function VoiceStudio() {
             ) : null}
             <form
               ref={cleanupFormRef}
-              action={cleanupFormAction}
+              action={cleanupAction}
               className="space-y-3"
             >
               <Textarea
                 id="raw-speech"
                 name="transcript"
                 ref={rawAreaRef}
-                defaultValue={cleanupState.raw}
+                defaultValue={initialRaw}
                 onChange={(event) => {
                   rawTextRef.current = event.currentTarget.value;
                   setRawText(event.currentTarget.value);
@@ -483,14 +507,7 @@ export function VoiceStudio() {
                 placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
                 className="min-h-48 resize-y"
               />
-              <button
-                type="submit"
-                id="clean-text-button"
-                disabled={!canClean}
-                className={buttonVariants({ variant: "outline", size: "sm" })}
-              >
-                Clean this text
-              </button>
+              <CleanSubmitButton disabled={busy} />
             </form>
           </CardContent>
         </Card>
@@ -510,7 +527,7 @@ export function VoiceStudio() {
             </CardAction>
           </CardHeader>
           <CardContent>
-            {cleanupPending || phase === "cleaning" ? (
+            {phase === "cleaning" ? (
               <p className="flex items-center gap-2 text-sm text-muted-foreground">
                 <LoaderCircle className="size-4 animate-spin" />
                 Removing fillers and 口癖…

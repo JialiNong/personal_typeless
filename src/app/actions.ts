@@ -1,36 +1,24 @@
 "use server";
 
+import { redirect } from "next/navigation";
+
 import { cleanupTranscriptText } from "@/lib/cleanup-server";
 
-export async function cleanupAction(
-  _previous: {
-    raw: string;
-    text: string;
-    source: "openai" | "local" | "";
-    error: string;
-    warning: string;
-  },
-  formData: FormData,
-) {
+export async function cleanupAction(formData: FormData) {
   const raw = String(formData.get("transcript") ?? "");
   const transcript = raw.trim();
+  const query = new URLSearchParams();
 
   if (!transcript) {
-    return {
-      raw,
-      text: "",
-      source: "" as const,
-      error: "Nothing to clean yet. Paste or record some speech first.",
-      warning: "",
-    };
+    query.set("error", "Nothing to clean yet. Paste or record some speech first.");
+    if (raw) query.set("raw", raw);
+    redirect(`/?${query.toString()}`);
   }
 
   const result = await cleanupTranscriptText(transcript);
-  return {
-    raw: transcript,
-    text: result.text,
-    source: result.source,
-    error: "",
-    warning: result.warning ?? "",
-  };
+  query.set("raw", transcript);
+  query.set("clean", result.text);
+  query.set("source", result.source);
+  if (result.warning) query.set("warning", result.warning);
+  redirect(`/?${query.toString()}`);
 }
