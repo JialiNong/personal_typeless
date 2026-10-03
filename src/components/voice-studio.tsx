@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -12,7 +12,7 @@ import {
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardAction,
@@ -92,6 +92,7 @@ export function VoiceStudio() {
   const timerRef = useRef<number | null>(null);
   const languageRef = useRef(language);
   const rawTextRef = useRef(rawText);
+  const rawAreaRef = useRef<HTMLTextAreaElement>(null);
   const whisperLoadingRef = useRef(false);
 
   languageRef.current = language;
@@ -279,7 +280,7 @@ export function VoiceStudio() {
         return;
       }
 
-      setRawText(transcript);
+      writeRawText(transcript);
       await runCleanup(transcript);
     } catch (transcribeError) {
       setError(
@@ -298,8 +299,7 @@ export function VoiceStudio() {
       return;
     }
 
-    setRawText(text);
-    rawTextRef.current = text;
+    writeRawText(text);
     setPhase("cleaning");
     setError(null);
 
@@ -334,12 +334,15 @@ export function VoiceStudio() {
     }
   }
 
-  function handleCleanupSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    const data = new FormData(event.currentTarget);
-    const fromForm = String(data.get("transcript") ?? "");
-    void runCleanup(fromForm || rawTextRef.current);
+  function writeRawText(text: string) {
+    rawTextRef.current = text;
+    if (rawAreaRef.current) rawAreaRef.current.value = text;
+    setRawText(text);
+  }
+
+  function handleCleanClick() {
+    const text = rawAreaRef.current?.value ?? rawTextRef.current;
+    void runCleanup(text);
   }
 
   async function toggleTalk() {
@@ -502,32 +505,24 @@ export function VoiceStudio() {
                 Transcribing on this device…
               </p>
             ) : null}
-            <form
-              className="space-y-3"
-              method="post"
-              onSubmit={handleCleanupSubmit}
+            <Textarea
+              ref={rawAreaRef}
+              defaultValue=""
+              onInput={(event) => {
+                rawTextRef.current = event.currentTarget.value;
+                setRawText(event.currentTarget.value);
+              }}
+              placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
+              className="min-h-48 resize-y"
+            />
+            <button
+              type="button"
+              disabled={!canClean}
+              onClick={handleCleanClick}
+              className={buttonVariants({ variant: "outline", size: "sm" })}
             >
-              <Textarea
-                name="transcript"
-                value={rawText}
-                onChange={(event) => setRawText(event.target.value)}
-                onInput={(event) => {
-                  rawTextRef.current = event.currentTarget.value;
-                  setRawText(event.currentTarget.value);
-                }}
-                placeholder="Nothing recorded yet. Talk in Chinese or English, or paste a messy draft here."
-                className="min-h-48 resize-y"
-              />
-              <Button
-                nativeButton
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={!canClean}
-              >
-                Clean this text
-              </Button>
-            </form>
+              Clean this text
+            </button>
           </CardContent>
         </Card>
 
